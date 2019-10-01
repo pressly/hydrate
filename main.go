@@ -16,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ssm"
 	"github.com/pkg/errors"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -144,8 +144,6 @@ func (ps *paramStore) hydrate(data *map[string]interface{}, path []string) error
 					return errors.Wrapf(err, "failed to fetch param %q", secret)
 				}
 				(*data)[key] = param.Parameter.Value
-			default:
-				fmt.Fprintf(os.Stderr, "nope, %q didn't match secret", v)
 			}
 
 		case map[string]interface{}:

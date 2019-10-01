@@ -70,7 +70,7 @@ func main() {
 		if err := dec.Decode(&data); err != nil {
 			log.Fatal(err)
 		}
-		if err := paramStore.Hydrate(&data); err != nil {
+		if err := paramStore.Hydrate(data); err != nil {
 			log.Fatal(err)
 		}
 		enc := json.NewEncoder(os.Stdout)
@@ -83,7 +83,7 @@ func main() {
 		if err := dec.Decode(&data); err != nil {
 			log.Fatal(err)
 		}
-		if err := paramStore.Hydrate(&data); err != nil {
+		if err := paramStore.Hydrate(data); err != nil {
 			log.Fatal(err)
 		}
 		enc := yaml.NewEncoder(os.Stdout)
@@ -99,7 +99,7 @@ func main() {
 		if err := toml.Unmarshal(b, &data); err != nil {
 			log.Fatal(err)
 		}
-		if err := paramStore.Hydrate(&data); err != nil {
+		if err := paramStore.Hydrate(data); err != nil {
 			log.Fatal(err)
 		}
 		dec := toml.NewEncoder(os.Stdout)
@@ -118,12 +118,12 @@ type paramStore struct {
 
 var secretWithValueRegex = regexp.MustCompile(`^\$SECRET:`)
 
-func (ps *paramStore) Hydrate(data *map[string]interface{}) error {
+func (ps *paramStore) Hydrate(data map[string]interface{}) error {
 	return ps.hydrate(data, nil)
 }
 
-func (ps *paramStore) hydrate(data *map[string]interface{}, path []string) error {
-	for key, value := range *data {
+func (ps *paramStore) hydrate(data map[string]interface{}, path []string) error {
+	for key, value := range data {
 		switch v := value.(type) {
 		case string:
 			// Match secret values and fetch from Param Store.
@@ -143,12 +143,12 @@ func (ps *paramStore) hydrate(data *map[string]interface{}, path []string) error
 				if err != nil {
 					return errors.Wrapf(err, "failed to fetch param %q", secret)
 				}
-				(*data)[key] = param.Parameter.Value
+				data[key] = param.Parameter.Value
 			}
 
 		case map[string]interface{}:
 			// Recursively go deeper.
-			if err := ps.hydrate(&v, append(path, key)); err != nil {
+			if err := ps.hydrate(v, append(path, key)); err != nil {
 				return err
 			}
 		}

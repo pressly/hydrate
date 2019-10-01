@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -21,8 +22,15 @@ import (
 
 var (
 	flags  = flag.NewFlagSet("hydrate", flag.ExitOnError)
-	pod    = flags.String("pod", "", "VC POD, ie. sit1")
 	region = flags.String("region", "", "AWS region")
+	format = flags.String("format", "", "input file format (json, yaml, toml)")
+	usage  = errors.New(`hydrate:
+Hydrate string values matching ^\$SECRET: regex with values from AWS SSM Param Store.
+
+usage:
+	hydrate pstore in.json > secret.json
+
+	echo "data: $SECRET:/app/sit1/app_secret_data_key" | hydrate pstore --format=yml - > secret.yml`)
 )
 
 // TODO: How do we
@@ -30,25 +38,35 @@ var (
 func main() {
 	flags.Parse(os.Args[1:])
 
-	if *pod == "" {
-		log.Fatal(errors.New("--pod=$POD option is required"))
-	}
 	if *region == "" {
 		*region = os.Getenv("AWS_DEFAULT_REGION")
 	}
 	if *region == "" {
-		log.Fatal(errors.New("either --region= option or $AWS_DEFAULT_REGION env var is required"))
+		log.Fatal(errors.New("hydrate: --region=[us-west-2] or $AWS_DEFAULT_REGION must be provided"))
 	}
 
 	args := flags.Args()
-	if len(args) != 1 {
-		log.Fatal(errors.New("single filename argument is required"))
+	if len(args) != 2 || args[0] != "pstore" {
+		log.Fatal(usage)
 	}
-	filename := args[0]
+	filename := args[1]
 
-	f, err := os.Open(filename)
-	if err != nil {
-		log.Fatal(err)
+	var r io.Reader
+	if filename == "-" {
+		if *format == "" {
+			log.Fatal(errors.New("hydrate: --format=[json|yaml|toml} must be provided when using STDIN"))
+		}
+		r = os.Stdin
+	} else {
+		if *format == "" {
+			*format = strings.TrimLeft(filepath.Ext(filename), ".")
+		}
+		f, err := os.Open(filename)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer f.Close()
+		r = io.Reader(f)
 	}
 
 	sess, err := session.NewSession(&aws.Config{
@@ -64,9 +82,9 @@ func main() {
 	}
 
 	var data map[string]interface{}
-	switch filepath.Ext(filename) {
-	case ".json":
-		dec := json.NewDecoder(f)
+	switch *format {
+	case "json":
+		dec := json.NewDecoder(r)
 		if err := dec.Decode(&data); err != nil {
 			log.Fatal(err)
 		}
@@ -78,8 +96,8 @@ func main() {
 			log.Fatal(err)
 		}
 
-	case ".yml", ".yaml":
-		dec := yaml.NewDecoder(f)
+	case "yml", "yaml":
+		dec := yaml.NewDecoder(r)
 		if err := dec.Decode(&data); err != nil {
 			log.Fatal(err)
 		}
@@ -91,8 +109,8 @@ func main() {
 			log.Fatal(err)
 		}
 
-	case ".toml":
-		b, err := ioutil.ReadAll(f)
+	case "toml":
+		b, err := ioutil.ReadAll(r)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -130,11 +148,6 @@ func (ps *paramStore) hydrate(data map[string]interface{}, path []string) error 
 			switch {
 			case secretWithValueRegex.MatchString(v):
 				secret := v[8:]
-
-				prefix := fmt.Sprintf("/app/%s/", *pod)
-				if !strings.HasPrefix(secret, prefix) {
-					return errors.Errorf("param %q doesn't match the $POD prefix %q", secret, prefix)
-				}
 
 				param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
 					Name:           aws.String(secret),

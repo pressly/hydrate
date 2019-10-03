@@ -9,13 +9,14 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/pkg/errors"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 var secretWithValueRegex = regexp.MustCompile(`^\$SECRET:`)
 
 func GetData(r io.Reader, format string) (map[string]interface{}, error) {
 	var data map[string]interface{}
+
 	switch format {
 	case "json":
 		dec := json.NewDecoder(r)

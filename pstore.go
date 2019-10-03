@@ -14,19 +14,46 @@ import (
 	"github.com/pkg/errors"
 )
 
+//go:generate syncmap -pkg hydrate -name storage map[string]string
+
 type paramStore struct {
 	ssm   *ssm.SSM
 	debug bool
+
+	secrets storage
 }
 
 func ParamStore(ssm *ssm.SSM) *paramStore {
 	return &paramStore{
-		ssm: ssm,
+		ssm:     ssm,
+		secrets: storage{},
 	}
 }
 
 func (ps *paramStore) Debug(debug bool) {
 	ps.debug = debug
+}
+
+func (ps *paramStore) GetSecret(key string) (string, error) {
+	if secret, ok := ps.secrets.Load(key); ok {
+		return secret, nil
+	}
+
+	if ps.debug {
+		fmt.Fprintf(os.Stderr, "\tfetching %q secret\n", key)
+	}
+
+	param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
+		Name:           aws.String(key),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	secret := *param.Parameter.Value
+	ps.secrets.Store(key, secret)
+	return secret, nil
 }
 
 func (ps *paramStore) Hydrate(data map[string]interface{}) error {
@@ -62,10 +89,10 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 		}
 
 		format := strings.TrimLeft(filepath.Ext(key), ".")
-		fmt.Fprintf(os.Stderr, "k8s: \"data\" hydrate base64-encoded field %q", key)
+
 		switch format {
 		case "json", "yml", "yaml", "toml":
-			fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q file\n", key)
+			fmt.Fprintf(os.Stderr, "k8s: hydrate \"data\".%q (base64-encoded %v file)\n", key, strings.ToUpper(format))
 
 			data, err := GetData(bytes.NewReader(decoded), format)
 			if err != nil {
@@ -84,7 +111,7 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 			k8sData[key] = base64.StdEncoding.EncodeToString(b.Bytes())
 		default:
 			// Just a value, not a file.
-			fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q value\n", key)
+			fmt.Fprintf(os.Stderr, "k8s: hydrate \"data\".%q (base64-encoded value)\n", key)
 
 			if secret, err := ps.hydrateValue(string(decoded)); err != nil {
 				return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
@@ -103,20 +130,14 @@ func (ps *paramStore) hydrateValue(v string) (*string, error) {
 	// Match secret values and fetch from Param Store.
 	switch {
 	case secretWithValueRegex.MatchString(v):
-		secret := v[8:]
-		if ps.debug {
-			fmt.Fprintf(os.Stderr, "\tfetching %q secret\n", secret)
-		}
+		secretKey := v[8:]
 
-		param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
-			Name:           aws.String(secret),
-			WithDecryption: aws.Bool(true),
-		})
+		secret, err := ps.GetSecret(secretKey)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to fetch param %q", secret)
+			return nil, errors.Wrapf(err, "failed to fetch param %q", secretKey)
 		}
 
-		return param.Parameter.Value, nil
+		return &secret, nil
 	}
 
 	return nil, nil

@@ -47,50 +47,55 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 	}
 
 	// Hydrate all base64-encoded "data" fields.
-	if data, ok := data["data"].(map[string]interface{}); ok {
-		for key, value := range data {
-			str, ok := value.(string)
-			if !ok {
-				continue
-			}
-			decoded, err := base64.StdEncoding.DecodeString(str)
+	k8sData, ok := data["data"].(map[string]interface{})
+	if !ok {
+		fmt.Fprintf(os.Stderr, "k8s: \"data\" field not found (%T)\n", data["data"])
+	}
+	for key, value := range k8sData {
+		str, ok := value.(string)
+		if !ok {
+			continue
+		}
+		decoded, err := base64.StdEncoding.DecodeString(str)
+		if err != nil {
+			return errors.Wrapf(err, "failed to base64-decode %q data field", key)
+		}
+
+		format := strings.TrimLeft(filepath.Ext(key), ".")
+		fmt.Fprintf(os.Stderr, "k8s: \"data\" hydrate base64-encoded field %q", key)
+		switch format {
+		case "json", "yml", "yaml", "toml":
+			fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q file\n", key)
+
+			data, err := GetData(bytes.NewReader(decoded), format)
 			if err != nil {
-				return errors.Wrapf(err, "failed to base64-decode %q data field", key)
+				log.Fatal(err)
 			}
 
-			format := strings.TrimLeft(filepath.Ext(key), ".")
-			switch format {
-			case "json", "yml", "yaml", "toml":
-				fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q file\n", key)
+			if err := ps.Hydrate(data); err != nil {
+				log.Fatal(err)
+			}
 
-				data, err := GetData(bytes.NewReader(decoded), format)
-				if err != nil {
-					log.Fatal(err)
-				}
+			var b bytes.Buffer
+			if err := PrintData(&b, data, format); err != nil {
+				log.Fatal(err)
+			}
 
-				if err := ps.Hydrate(data); err != nil {
-					log.Fatal(err)
-				}
+			k8sData[key] = base64.StdEncoding.EncodeToString(b.Bytes())
+		default:
+			// Just a value, not a file.
+			fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q value\n", key)
 
-				var b bytes.Buffer
-				if err := PrintData(&b, data, format); err != nil {
-					log.Fatal(err)
-				}
-
-				data[key] = base64.StdEncoding.EncodeToString(b.Bytes())
-			default:
-				// Just a value, not a file.
-				fmt.Fprintf(os.Stderr, "k8s: decoding base64-encoded data field %q value\n", key)
-
-				if secret, err := ps.hydrateValue(string(decoded)); err != nil {
-					return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
-				} else if secret != nil {
-					data[key] = base64.StdEncoding.EncodeToString([]byte(*secret))
-				}
+			if secret, err := ps.hydrateValue(string(decoded)); err != nil {
+				return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
+			} else if secret != nil {
+				k8sData[key] = base64.StdEncoding.EncodeToString([]byte(*secret))
 			}
 		}
 	}
+
 	// TODO: Hydrate plain-text "stringData" fields.
+
 	return nil
 }
 

@@ -23,18 +23,19 @@ var (
 	k8s    = flags.Bool("k8s", false, "hydrate Kubernetes Secret/ConfigMap objects' base64-encoded data fields")
 
 	usage = errors.New(`hydrate:
-Hydrate string values matching ^\$SECRET: regex with values from AWS SSM Param Store.
+
+Hydrate values matching "^\$SECRET:" regex with values from AWS SSM Param Store.
 
 usage:
 	# hydrate JSON file
-		hydrate pstore in.json > secret.json
+		hydrate no-secrets.json > secrets.json
 
 	# hydrate YAML data from stdin
-		echo "data: $SECRET:/app/sit1/app_secret_data_key" | hydrate pstore --format=yml - > secret.yml
+		echo "data: $SECRET:/app/sit1/app_secret_data_key" | hydrate --format=yml - > secret.yml
 
-	# hydrate data/files in Kubernetes Secrets/ConfigMap objects
-		hydrate -k8s pstore k8s-secret.yml | kubectl apply -
-	`)
+	# hydrate Kubernetes Secrets/ConfigMap "stringData" and base64-encoded "data" files/values
+		hydrate -k8s k8s-secret.yml | kubectl apply -
+`)
 )
 
 func main() {
@@ -48,10 +49,10 @@ func main() {
 	}
 
 	args := flags.Args()
-	if len(args) != 2 || args[0] != "pstore" {
+	if len(args) != 1 {
 		log.Fatal(usage)
 	}
-	filename := args[1]
+	filename := args[0]
 
 	var r io.Reader
 	if filename == "-" {

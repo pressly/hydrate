@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,19 +22,26 @@ import (
 )
 
 var (
-	flags  = flag.NewFlagSet("hydrate", flag.ExitOnError)
-	region = flags.String("region", "", "AWS region")
-	format = flags.String("format", "", "input file format (json, yaml, toml)")
-	usage  = errors.New(`hydrate:
+	flags        = flag.NewFlagSet("hydrate", flag.ExitOnError)
+	region       = flags.String("region", "", "AWS region")
+	format       = flags.String("format", "", "input file format (json, yaml, toml, k8s)")
+	debug        = flags.Bool("debug", false, "print debug info to stderr")
+	enableBase64 = flags.Bool("base64", false, "base64 decode/encode all string value fields automatically (useful for Kubernetes Secrets/ConfigMap object data)")
+
+	usage = errors.New(`hydrate:
 Hydrate string values matching ^\$SECRET: regex with values from AWS SSM Param Store.
 
 usage:
-	hydrate pstore in.json > secret.json
+	# hydrate JSON file
+		hydrate pstore in.json > secret.json
 
-	echo "data: $SECRET:/app/sit1/app_secret_data_key" | hydrate pstore --format=yml - > secret.yml`)
+	# hydrate YAML data from stdin
+		echo "data: $SECRET:/app/sit1/app_secret_data_key" | hydrate pstore --format=yml - > secret.yml
+
+	# hydrate data/files in Kubernetes Secrets/ConfigMap objects
+		hydrate --format=k8s pstore k8s-secret.yml | kubectl apply -
+	`)
 )
-
-// TODO: How do we
 
 func main() {
 	flags.Parse(os.Args[1:])
@@ -78,7 +86,9 @@ func main() {
 	}
 
 	paramStore := &paramStore{
-		ssm: ssm.New(sess, aws.NewConfig()),
+		ssm:    ssm.New(sess, aws.NewConfig()),
+		base64: *enableBase64,
+		debug:  *debug,
 	}
 
 	var data map[string]interface{}
@@ -131,7 +141,9 @@ func main() {
 }
 
 type paramStore struct {
-	ssm *ssm.SSM
+	ssm    *ssm.SSM
+	base64 bool
+	debug  bool
 }
 
 var secretWithValueRegex = regexp.MustCompile(`^\$SECRET:`)
@@ -144,10 +156,23 @@ func (ps *paramStore) hydrate(data map[string]interface{}, path []string) error 
 	for key, value := range data {
 		switch v := value.(type) {
 		case string:
+			if ps.base64 {
+				decoded, err := base64.StdEncoding.DecodeString(v)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "couldn't decode %v value\n", key)
+					continue
+				}
+				v = string(decoded)
+				fmt.Fprintf(os.Stderr, "decoded %v value!!\n", key)
+			}
+
 			// Match secret values and fetch from Param Store.
 			switch {
 			case secretWithValueRegex.MatchString(v):
 				secret := v[8:]
+				if ps.debug {
+					fmt.Fprintf(os.Stderr, "going to fetch %q secret", aws.String(secret))
+				}
 
 				param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
 					Name:           aws.String(secret),
@@ -156,7 +181,12 @@ func (ps *paramStore) hydrate(data map[string]interface{}, path []string) error 
 				if err != nil {
 					return errors.Wrapf(err, "failed to fetch param %q", secret)
 				}
-				data[key] = param.Parameter.Value
+
+				if ps.base64 {
+					data[key] = base64.StdEncoding.EncodeToString([]byte(*param.Parameter.Value))
+				} else {
+					data[key] = param.Parameter.Value
+				}
 			}
 
 		case map[string]interface{}:

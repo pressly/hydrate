@@ -14,19 +14,21 @@ import (
 	"github.com/pkg/errors"
 )
 
-//go:generate syncmap -pkg hydrate -name storage map[string]string
+//go:generate syncmap -pkg hydrate -name stringMap map[string]string
 
 type paramStore struct {
-	ssm   *ssm.SSM
-	debug bool
+	ssm      *ssm.SSM
+	basePath string
+	debug    bool
 
-	secrets storage
+	secrets stringMap
 }
 
-func ParamStore(ssm *ssm.SSM) *paramStore {
+func ParamStore(ssm *ssm.SSM, basePath string) *paramStore {
 	return &paramStore{
-		ssm:     ssm,
-		secrets: storage{},
+		ssm:      ssm,
+		secrets:  stringMap{},
+		basePath: basePath,
 	}
 }
 
@@ -35,6 +37,13 @@ func (ps *paramStore) Debug(debug bool) {
 }
 
 func (ps *paramStore) GetSecret(key string) (string, error) {
+	if !strings.HasPrefix(key, ps.basePath) {
+		key = filepath.Join(ps.basePath, key)
+	}
+	if !strings.HasPrefix(key, "/") {
+		return "", errors.Errorf("%q doesn't look like a valid parameter path, did you provide default path, ie. --path=/app/sit1/ ?", key)
+	}
+
 	if secret, ok := ps.secrets.Load(key); ok {
 		return secret, nil
 	}
@@ -48,7 +57,7 @@ func (ps *paramStore) GetSecret(key string) (string, error) {
 		WithDecryption: aws.Bool(true),
 	})
 	if err != nil {
-		return "", err
+		return "", errors.Wrapf(err, "failed to fetch %q parameter", key)
 	}
 
 	secret := *param.Parameter.Value
@@ -113,7 +122,7 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 			// Just a value, not a file.
 			fmt.Fprintf(os.Stderr, "k8s: hydrate \"data\".%q (base64-encoded value)\n", key)
 
-			if secret, err := ps.hydrateValue(string(decoded)); err != nil {
+			if secret, err := ps.hydrateKeyValue(key, string(decoded)); err != nil {
 				return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
 			} else if secret != nil {
 				k8sData[key] = base64.StdEncoding.EncodeToString([]byte(*secret))
@@ -126,15 +135,23 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 	return nil
 }
 
-func (ps *paramStore) hydrateValue(v string) (*string, error) {
+func (ps *paramStore) hydrateKeyValue(key, value string) (*string, error) {
 	// Match secret values and fetch from Param Store.
 	switch {
-	case secretWithValueRegex.MatchString(v):
-		secretKey := v[8:]
+	case value == "$$" || value == "$SECRET":
+		secret, err := ps.GetSecret(key)
+		if err != nil {
+			return nil, errors.Wrapf(err, "%v=%q", key, value)
+		}
+
+		return &secret, nil
+
+	case strings.HasPrefix(value, "$SECRET:"):
+		secretKey := strings.TrimPrefix(value, "$SECRET:")
 
 		secret, err := ps.GetSecret(secretKey)
 		if err != nil {
-			return nil, errors.Wrapf(err, "failed to fetch param %q", secretKey)
+			return nil, errors.Wrapf(err, "%v=%q", key, value)
 		}
 
 		return &secret, nil
@@ -147,8 +164,8 @@ func (ps *paramStore) hydrateRecursively(data map[string]interface{}, path []str
 	for key, value := range data {
 		switch v := value.(type) {
 		case string:
-			if secret, err := ps.hydrateValue(v); err != nil {
-				return errors.Wrapf(err, "failed to hydrate %q", strings.Join(append(path, key), "."))
+			if secret, err := ps.hydrateKeyValue(key, v); err != nil {
+				return errors.Wrapf(err, "failed to hydrate %q field", strings.Join(append(path, key), "."))
 			} else if secret != nil {
 				data[key] = *secret
 			}

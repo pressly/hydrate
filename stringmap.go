@@ -27,7 +27,7 @@ import (
 // contention compared to a Go map paired with a separate Mutex or RWMutex.
 //
 // The zero Map is empty and ready for use. A Map must not be copied after first use.
-type storage struct {
+type stringMap struct {
 	mu sync.Mutex
 
 	// read contains the portion of the map's contents that are safe for
@@ -51,7 +51,7 @@ type storage struct {
 	//
 	// If the dirty map is nil, the next write to the map will initialize it by
 	// making a shallow copy of the clean map, omitting stale entries.
-	dirty map[string]*entryStorage
+	dirty map[string]*entryStringMap
 
 	// misses counts the number of loads since the read map was last updated that
 	// needed to lock mu to determine whether the key was present.
@@ -63,17 +63,17 @@ type storage struct {
 }
 
 // readOnly is an immutable struct stored atomically in the Map.read field.
-type readOnlyStorage struct {
-	m       map[string]*entryStorage
+type readOnlyStringMap struct {
+	m       map[string]*entryStringMap
 	amended bool // true if the dirty map contains some key not in m.
 }
 
 // expunged is an arbitrary pointer that marks entries which have been deleted
 // from the dirty map.
-var expungedStorage = unsafe.Pointer(new(string))
+var expungedStringMap = unsafe.Pointer(new(string))
 
 // An entry is a slot in the map corresponding to a particular key.
-type entryStorage struct {
+type entryStringMap struct {
 	// p points to the interface{} value stored for the entry.
 	//
 	// If p == nil, the entry has been deleted and m.dirty == nil.
@@ -95,22 +95,22 @@ type entryStorage struct {
 	p unsafe.Pointer // *interface{}
 }
 
-func newEntryStorage(i string) *entryStorage {
-	return &entryStorage{p: unsafe.Pointer(&i)}
+func newEntryStringMap(i string) *entryStringMap {
+	return &entryStringMap{p: unsafe.Pointer(&i)}
 }
 
 // Load returns the value stored in the map for a key, or nil if no
 // value is present.
 // The ok result indicates whether value was found in the map.
-func (m *storage) Load(key string) (value string, ok bool) {
-	read, _ := m.read.Load().(readOnlyStorage)
+func (m *stringMap) Load(key string) (value string, ok bool) {
+	read, _ := m.read.Load().(readOnlyStringMap)
 	e, ok := read.m[key]
 	if !ok && read.amended {
 		m.mu.Lock()
 		// Avoid reporting a spurious miss if m.dirty got promoted while we were
 		// blocked on m.mu. (If further loads of the same key will not miss, it's
 		// not worth copying the dirty map for this key.)
-		read, _ = m.read.Load().(readOnlyStorage)
+		read, _ = m.read.Load().(readOnlyStringMap)
 		e, ok = read.m[key]
 		if !ok && read.amended {
 			e, ok = m.dirty[key]
@@ -127,23 +127,23 @@ func (m *storage) Load(key string) (value string, ok bool) {
 	return e.load()
 }
 
-func (e *entryStorage) load() (value string, ok bool) {
+func (e *entryStringMap) load() (value string, ok bool) {
 	p := atomic.LoadPointer(&e.p)
-	if p == nil || p == expungedStorage {
+	if p == nil || p == expungedStringMap {
 		return value, false
 	}
 	return *(*string)(p), true
 }
 
 // Store sets the value for a key.
-func (m *storage) Store(key, value string) {
-	read, _ := m.read.Load().(readOnlyStorage)
+func (m *stringMap) Store(key, value string) {
+	read, _ := m.read.Load().(readOnlyStringMap)
 	if e, ok := read.m[key]; ok && e.tryStore(&value) {
 		return
 	}
 
 	m.mu.Lock()
-	read, _ = m.read.Load().(readOnlyStorage)
+	read, _ = m.read.Load().(readOnlyStringMap)
 	if e, ok := read.m[key]; ok {
 		if e.unexpungeLocked() {
 			// The entry was previously expunged, which implies that there is a
@@ -158,9 +158,9 @@ func (m *storage) Store(key, value string) {
 			// We're adding the first new key to the dirty map.
 			// Make sure it is allocated and mark the read-only map as incomplete.
 			m.dirtyLocked()
-			m.read.Store(readOnlyStorage{m: read.m, amended: true})
+			m.read.Store(readOnlyStringMap{m: read.m, amended: true})
 		}
-		m.dirty[key] = newEntryStorage(value)
+		m.dirty[key] = newEntryStringMap(value)
 	}
 	m.mu.Unlock()
 }
@@ -169,10 +169,10 @@ func (m *storage) Store(key, value string) {
 //
 // If the entry is expunged, tryStore returns false and leaves the entry
 // unchanged.
-func (e *entryStorage) tryStore(i *string) bool {
+func (e *entryStringMap) tryStore(i *string) bool {
 	for {
 		p := atomic.LoadPointer(&e.p)
-		if p == expungedStorage {
+		if p == expungedStringMap {
 			return false
 		}
 		if atomic.CompareAndSwapPointer(&e.p, p, unsafe.Pointer(i)) {
@@ -185,23 +185,23 @@ func (e *entryStorage) tryStore(i *string) bool {
 //
 // If the entry was previously expunged, it must be added to the dirty map
 // before m.mu is unlocked.
-func (e *entryStorage) unexpungeLocked() (wasExpunged bool) {
-	return atomic.CompareAndSwapPointer(&e.p, expungedStorage, nil)
+func (e *entryStringMap) unexpungeLocked() (wasExpunged bool) {
+	return atomic.CompareAndSwapPointer(&e.p, expungedStringMap, nil)
 }
 
 // storeLocked unconditionally stores a value to the entry.
 //
 // The entry must be known not to be expunged.
-func (e *entryStorage) storeLocked(i *string) {
+func (e *entryStringMap) storeLocked(i *string) {
 	atomic.StorePointer(&e.p, unsafe.Pointer(i))
 }
 
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it stores and returns the given value.
 // The loaded result is true if the value was loaded, false if stored.
-func (m *storage) LoadOrStore(key, value string) (actual string, loaded bool) {
+func (m *stringMap) LoadOrStore(key, value string) (actual string, loaded bool) {
 	// Avoid locking if it's a clean hit.
-	read, _ := m.read.Load().(readOnlyStorage)
+	read, _ := m.read.Load().(readOnlyStringMap)
 	if e, ok := read.m[key]; ok {
 		actual, loaded, ok := e.tryLoadOrStore(value)
 		if ok {
@@ -210,7 +210,7 @@ func (m *storage) LoadOrStore(key, value string) (actual string, loaded bool) {
 	}
 
 	m.mu.Lock()
-	read, _ = m.read.Load().(readOnlyStorage)
+	read, _ = m.read.Load().(readOnlyStringMap)
 	if e, ok := read.m[key]; ok {
 		if e.unexpungeLocked() {
 			m.dirty[key] = e
@@ -224,9 +224,9 @@ func (m *storage) LoadOrStore(key, value string) (actual string, loaded bool) {
 			// We're adding the first new key to the dirty map.
 			// Make sure it is allocated and mark the read-only map as incomplete.
 			m.dirtyLocked()
-			m.read.Store(readOnlyStorage{m: read.m, amended: true})
+			m.read.Store(readOnlyStringMap{m: read.m, amended: true})
 		}
-		m.dirty[key] = newEntryStorage(value)
+		m.dirty[key] = newEntryStringMap(value)
 		actual, loaded = value, false
 	}
 	m.mu.Unlock()
@@ -239,9 +239,9 @@ func (m *storage) LoadOrStore(key, value string) (actual string, loaded bool) {
 //
 // If the entry is expunged, tryLoadOrStore leaves the entry unchanged and
 // returns with ok==false.
-func (e *entryStorage) tryLoadOrStore(i string) (actual string, loaded, ok bool) {
+func (e *entryStringMap) tryLoadOrStore(i string) (actual string, loaded, ok bool) {
 	p := atomic.LoadPointer(&e.p)
-	if p == expungedStorage {
+	if p == expungedStringMap {
 		return actual, false, false
 	}
 	if p != nil {
@@ -257,7 +257,7 @@ func (e *entryStorage) tryLoadOrStore(i string) (actual string, loaded, ok bool)
 			return i, false, true
 		}
 		p = atomic.LoadPointer(&e.p)
-		if p == expungedStorage {
+		if p == expungedStringMap {
 			return actual, false, false
 		}
 		if p != nil {
@@ -267,12 +267,12 @@ func (e *entryStorage) tryLoadOrStore(i string) (actual string, loaded, ok bool)
 }
 
 // Delete deletes the value for a key.
-func (m *storage) Delete(key string) {
-	read, _ := m.read.Load().(readOnlyStorage)
+func (m *stringMap) Delete(key string) {
+	read, _ := m.read.Load().(readOnlyStringMap)
 	e, ok := read.m[key]
 	if !ok && read.amended {
 		m.mu.Lock()
-		read, _ = m.read.Load().(readOnlyStorage)
+		read, _ = m.read.Load().(readOnlyStringMap)
 		e, ok = read.m[key]
 		if !ok && read.amended {
 			delete(m.dirty, key)
@@ -284,10 +284,10 @@ func (m *storage) Delete(key string) {
 	}
 }
 
-func (e *entryStorage) delete() (hadValue bool) {
+func (e *entryStringMap) delete() (hadValue bool) {
 	for {
 		p := atomic.LoadPointer(&e.p)
-		if p == nil || p == expungedStorage {
+		if p == nil || p == expungedStringMap {
 			return false
 		}
 		if atomic.CompareAndSwapPointer(&e.p, p, nil) {
@@ -306,21 +306,21 @@ func (e *entryStorage) delete() (hadValue bool) {
 //
 // Range may be O(N) with the number of elements in the map even if f returns
 // false after a constant number of calls.
-func (m *storage) Range(f func(key, value string) bool) {
+func (m *stringMap) Range(f func(key, value string) bool) {
 	// We need to be able to iterate over all of the keys that were already
 	// present at the start of the call to Range.
 	// If read.amended is false, then read.m satisfies that property without
 	// requiring us to hold m.mu for a long time.
-	read, _ := m.read.Load().(readOnlyStorage)
+	read, _ := m.read.Load().(readOnlyStringMap)
 	if read.amended {
 		// m.dirty contains keys not in read.m. Fortunately, Range is already O(N)
 		// (assuming the caller does not break out early), so a call to Range
 		// amortizes an entire copy of the map: we can promote the dirty copy
 		// immediately!
 		m.mu.Lock()
-		read, _ = m.read.Load().(readOnlyStorage)
+		read, _ = m.read.Load().(readOnlyStringMap)
 		if read.amended {
-			read = readOnlyStorage{m: m.dirty}
+			read = readOnlyStringMap{m: m.dirty}
 			m.read.Store(read)
 			m.dirty = nil
 			m.misses = 0
@@ -339,23 +339,23 @@ func (m *storage) Range(f func(key, value string) bool) {
 	}
 }
 
-func (m *storage) missLocked() {
+func (m *stringMap) missLocked() {
 	m.misses++
 	if m.misses < len(m.dirty) {
 		return
 	}
-	m.read.Store(readOnlyStorage{m: m.dirty})
+	m.read.Store(readOnlyStringMap{m: m.dirty})
 	m.dirty = nil
 	m.misses = 0
 }
 
-func (m *storage) dirtyLocked() {
+func (m *stringMap) dirtyLocked() {
 	if m.dirty != nil {
 		return
 	}
 
-	read, _ := m.read.Load().(readOnlyStorage)
-	m.dirty = make(map[string]*entryStorage, len(read.m))
+	read, _ := m.read.Load().(readOnlyStringMap)
+	m.dirty = make(map[string]*entryStringMap, len(read.m))
 	for k, e := range read.m {
 		if !e.tryExpungeLocked() {
 			m.dirty[k] = e
@@ -363,13 +363,13 @@ func (m *storage) dirtyLocked() {
 	}
 }
 
-func (e *entryStorage) tryExpungeLocked() (isExpunged bool) {
+func (e *entryStringMap) tryExpungeLocked() (isExpunged bool) {
 	p := atomic.LoadPointer(&e.p)
 	for p == nil {
-		if atomic.CompareAndSwapPointer(&e.p, nil, expungedStorage) {
+		if atomic.CompareAndSwapPointer(&e.p, nil, expungedStringMap) {
 			return true
 		}
 		p = atomic.LoadPointer(&e.p)
 	}
-	return p == expungedStorage
+	return p == expungedStringMap
 }

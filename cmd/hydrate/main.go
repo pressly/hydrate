@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	flags  = flag.NewFlagSet("hydrate", flag.ExitOnError)
-	region = flags.String("region", "", "AWS region")
-	format = flags.String("format", "", "input file format (json, yaml, toml, k8s)")
-	debug  = flags.Bool("debug", false, "print debug info to stderr")
-	k8s    = flags.Bool("k8s", false, "hydrate Kubernetes Secret/ConfigMap objects' base64-encoded data fields")
+	flags    = flag.NewFlagSet("hydrate", flag.ExitOnError)
+	region   = flags.String("region", "", "AWS region")
+	basePath = flags.String("path", "", "base path for AWS SSM Parameter Store parameters")
+	format   = flags.String("format", "", "input file format (json, yaml, toml, k8s)")
+	debug    = flags.Bool("debug", false, "print debug info to stderr")
+	k8s      = flags.Bool("k8s", false, "hydrate Kubernetes Secret/ConfigMap objects' base64-encoded data fields")
 
 	usage = errors.New(`hydrate:
 
@@ -80,7 +81,7 @@ func main() {
 		log.Fatal(errors.Wrap(err, "failed to create aws session"))
 	}
 
-	paramStore := hydrate.ParamStore(ssm.New(sess, aws.NewConfig()))
+	paramStore := hydrate.ParamStore(ssm.New(sess, aws.NewConfig()), *basePath)
 	if *debug {
 		paramStore.Debug(true)
 	}

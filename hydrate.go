@@ -5,14 +5,11 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"regexp"
 
 	"github.com/BurntSushi/toml"
 	"github.com/pkg/errors"
 	"gopkg.in/yaml.v3"
 )
-
-var secretWithValueRegex = regexp.MustCompile(`^\$SECRET:`)
 
 func GetData(r io.Reader, format string) (map[string]interface{}, error) {
 	var data map[string]interface{}

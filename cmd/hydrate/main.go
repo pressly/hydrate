@@ -17,9 +17,9 @@ import (
 
 var (
 	flags    = flag.NewFlagSet("hydrate", flag.ExitOnError)
-	region   = flags.String("region", "", "AWS region")
+	region   = flags.String("region", "", "AWS region (defaults to $AWS_DEFAULT_REGION)")
 	basePath = flags.String("path", "", "base path for AWS SSM Parameter Store parameters")
-	format   = flags.String("format", "", "input file format (json, yaml, toml, k8s)")
+	format   = flags.String("format", "yaml", "input file format: json, yaml, toml (default yaml)")
 	debug    = flags.Bool("debug", false, "print debug info to stderr")
 	k8s      = flags.Bool("k8s", false, "hydrate Kubernetes Secret/ConfigMap objects' base64-encoded data fields")
 

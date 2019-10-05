@@ -37,20 +37,21 @@ func (ps *paramStore) Debug(debug bool) {
 }
 
 func (ps *paramStore) GetSecret(key string) (string, error) {
-	if !strings.HasPrefix(key, ps.basePath) {
-		key = filepath.Join(ps.basePath, key)
-	}
 	if !strings.HasPrefix(key, "/") {
-		return "", errors.Errorf("%q doesn't look like a valid parameter path, did you provide default path, ie. --path=/app/sit1/ ?", key)
+		if ps.basePath == "" {
+			return "", errors.Errorf("%q doesn't look like a valid parameter path, did you provide default path, ie. --path=/app/sit1/ ?", key)
+		}
+		if !strings.HasPrefix(key, ps.basePath) {
+			fmt.Fprintf(os.Stderr, "\tWARNING: %q secret key doesn't match the base path %q\n", key, ps.basePath)
+		}
+		key = filepath.Join(ps.basePath, key)
 	}
 
 	if secret, ok := ps.secrets.Load(key); ok {
 		return secret, nil
 	}
 
-	if ps.debug {
-		fmt.Fprintf(os.Stderr, "\tfetching %q secret\n", key)
-	}
+	fmt.Fprintf(os.Stderr, "- fetching %q secret from AWS SSM Parameter Store\n", key)
 
 	param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
 		Name:           aws.String(key),
@@ -74,19 +75,28 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 	kind, _ := data["kind"].(string)
 	switch kind {
 	case "ConfigMap", "Secret":
+		kind = strings.ToLower(kind)
 		// OK. Proceed.
 	case "":
 		// Empty kind, this doesn't look like k8s object at all.. let's treat it as regular file.
 		return ps.hydrateRecursively(data, nil)
 	default:
-		return errors.Errorf("k8s object is of kind=%q (supported: ConfigMap, Secret)", kind)
+		return errors.Errorf("hydrate k8s object is of kind=%q (supported: ConfigMap, Secret)", kind)
+	}
+
+	metadata, ok := data["metadata"].(map[string]interface{})
+	if !ok {
+		return errors.Errorf("hydrate k8s object of kind=%q doesn't have metadata", kind)
+	}
+	name, _ := metadata["name"].(string)
+
+	k8sData, ok1 := data["data"].(map[string]interface{})
+	k8sStringData, ok2 := data["stringData"].(map[string]interface{})
+	if !ok1 && !ok2 {
+		fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: can't find \"data\" or \"stringData\" field\n", kind, name)
 	}
 
 	// Hydrate all base64-encoded "data" fields.
-	k8sData, ok := data["data"].(map[string]interface{})
-	if !ok {
-		fmt.Fprintf(os.Stderr, "k8s: \"data\" field not found (%T)\n", data["data"])
-	}
 	for key, value := range k8sData {
 		str, ok := value.(string)
 		if !ok {
@@ -101,7 +111,7 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 
 		switch format {
 		case "json", "yml", "yaml", "toml":
-			fmt.Fprintf(os.Stderr, "k8s: hydrate \"data\".%q (base64-encoded %v file)\n", key, strings.ToUpper(format))
+			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: data.%q (base64-encoded %v file data)\n", kind, name, key, strings.ToUpper(format))
 
 			data, err := GetData(bytes.NewReader(decoded), format)
 			if err != nil {
@@ -120,7 +130,7 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 			k8sData[key] = base64.StdEncoding.EncodeToString(b.Bytes())
 		default:
 			// Just a value, not a file.
-			fmt.Fprintf(os.Stderr, "k8s: hydrate \"data\".%q (base64-encoded value)\n", key)
+			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: data.%q (base64-encoded value)\n", kind, name, key)
 
 			if secret, err := ps.hydrateKeyValue(key, string(decoded)); err != nil {
 				return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
@@ -130,7 +140,45 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 		}
 	}
 
-	// TODO: Hydrate plain-text "stringData" fields.
+	// Hydrate plain-text "stringData" fields.
+	for key, value := range k8sStringData {
+		str, ok := value.(string)
+		if !ok {
+			continue
+		}
+
+		format := strings.TrimLeft(filepath.Ext(key), ".")
+
+		switch format {
+		case "json", "yml", "yaml", "toml":
+			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: hydrate stringData.%q (plain-text %v file data)\n", kind, name, key, strings.ToUpper(format))
+
+			data, err := GetData(strings.NewReader(str), format)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			if err := ps.Hydrate(data); err != nil {
+				log.Fatal(err)
+			}
+
+			var b bytes.Buffer
+			if err := PrintData(&b, data, format); err != nil {
+				log.Fatal(err)
+			}
+
+			k8sStringData[key] = b.String()
+		default:
+			// Just a value, not a file.
+			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: hydrate stringData.%q (plain-text value)\n", kind, name, key)
+
+			if secret, err := ps.hydrateKeyValue(key, str); err != nil {
+				return errors.Wrapf(err, "failed to hydrate k8s data field %q", key)
+			} else if secret != nil {
+				k8sStringData[key] = *secret
+			}
+		}
+	}
 
 	return nil
 }

@@ -89,7 +89,7 @@ func main() {
 	var r io.Reader
 	if filename == "-" {
 		if *format == "" {
-			log.Fatal(errors.New("hydrate: --format=[json|yaml|toml} must be provided when using STDIN"))
+			log.Fatal(errors.New("hydrate: --format=[json|yaml|toml] must be provided when using STDIN"))
 		}
 		r = os.Stdin
 	} else {
@@ -113,26 +113,7 @@ func main() {
 	}
 
 	paramStore := hydrate.ParamStore(ssm.New(sess, aws.NewConfig()), *basePath)
-	if *debug {
-		paramStore.Debug(true)
-	}
-
-	data, err := hydrate.GetData(r, *format)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if *k8s {
-		if err := paramStore.HydrateK8s(data); err != nil {
-			log.Fatal(err)
-		}
-	} else {
-		if err := paramStore.Hydrate(data); err != nil {
-			log.Fatal(err)
-		}
-	}
-
-	if err := hydrate.PrintData(os.Stdout, data, *format); err != nil {
+	if err := paramStore.Hydrate(os.Stdout, r, *format, *k8s); err != nil {
 		log.Fatal(err)
 	}
 }

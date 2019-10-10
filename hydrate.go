@@ -11,53 +11,55 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func GetData(r io.Reader, format string) (map[string]interface{}, error) {
-	var data map[string]interface{}
-
+func (ps *paramStore) Hydrate(w io.Writer, r io.Reader, format string, k8s bool) error {
 	switch format {
 	case "json":
 		dec := json.NewDecoder(r)
+		var data map[string]interface{}
 		if err := dec.Decode(&data); err != nil {
-			return nil, errors.Wrap(err, "failed to decode JSON")
+			return errors.Wrap(err, "failed to decode JSON")
 		}
-
-	case "yml", "yaml":
-		dec := yaml.NewDecoder(r)
-		if err := dec.Decode(&data); err != nil {
-			return nil, errors.Wrap(err, "failed to decode YAML")
+		if err := ps.hydrateData(data, k8s); err != nil {
+			return err
 		}
-
-	case "toml":
-		b, err := ioutil.ReadAll(r)
-		if err != nil {
-			return nil, errors.Wrap(err, "failed to read TOML data")
-		}
-		if err := toml.Unmarshal(b, &data); err != nil {
-			return nil, errors.Wrap(err, "failed to decode TOML")
-		}
-
-	default:
-		return nil, fmt.Errorf("failed to hydrate: unknown file format %q", format)
-	}
-
-	return data, nil
-}
-
-func PrintData(w io.Writer, data map[string]interface{}, format string) error {
-	switch format {
-	case "json":
 		enc := json.NewEncoder(w)
 		if err := enc.Encode(data); err != nil {
 			return errors.Wrap(err, "failed to encode JSON")
 		}
 
 	case "yml", "yaml":
+		dec := yaml.NewDecoder(r)
 		enc := yaml.NewEncoder(w)
-		if err := enc.Encode(data); err != nil {
-			return errors.Wrap(err, "failed to encode YAML")
+
+		// Support multiple YAML documents within a single file.
+		for {
+			var data map[string]interface{}
+			if err := dec.Decode(&data); err != nil {
+				if err == io.EOF { // Last document.
+					break
+				}
+				return errors.Wrap(err, "failed to decode YAML")
+			}
+			if err := ps.hydrateData(data, k8s); err != nil {
+				return err
+			}
+			if err := enc.Encode(data); err != nil {
+				return errors.Wrap(err, "failed to encode YAML")
+			}
 		}
 
 	case "toml":
+		var data map[string]interface{}
+		b, err := ioutil.ReadAll(r)
+		if err != nil {
+			return errors.Wrap(err, "failed to read TOML data")
+		}
+		if err := toml.Unmarshal(b, &data); err != nil {
+			return errors.Wrap(err, "failed to decode TOML")
+		}
+		if err := ps.hydrateData(data, k8s); err != nil {
+			return err
+		}
 		enc := toml.NewEncoder(w)
 		if err := enc.Encode(data); err != nil {
 			return errors.Wrap(err, "failed to encode TOML")

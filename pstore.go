@@ -19,7 +19,6 @@ import (
 type paramStore struct {
 	ssm      *ssm.SSM
 	basePath string
-	debug    bool
 
 	secrets stringMap
 }
@@ -30,10 +29,6 @@ func ParamStore(ssm *ssm.SSM, basePath string) *paramStore {
 		secrets:  stringMap{},
 		basePath: basePath,
 	}
-}
-
-func (ps *paramStore) Debug(debug bool) {
-	ps.debug = debug
 }
 
 func (ps *paramStore) GetSecret(key string) (string, error) {
@@ -63,14 +58,18 @@ func (ps *paramStore) GetSecret(key string) (string, error) {
 
 	secret := *param.Parameter.Value
 	ps.secrets.Store(key, secret)
+
 	return secret, nil
 }
 
-func (ps *paramStore) Hydrate(data map[string]interface{}) error {
-	return ps.hydrateRecursively(data, nil)
+func (ps *paramStore) hydrateData(data map[string]interface{}, k8s bool) error {
+	if k8s {
+		return ps.hydrateK8sObject(data)
+	}
+	return ps.hydrateMapRecursively(data, nil)
 }
 
-func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
+func (ps *paramStore) hydrateK8sObject(data map[string]interface{}) error {
 	// Kubernetes object.
 	kind, _ := data["kind"].(string)
 	switch kind {
@@ -79,7 +78,7 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 		// OK. Proceed.
 	case "":
 		// Empty kind, this doesn't look like k8s object at all.. let's treat it as regular file.
-		return ps.hydrateRecursively(data, nil)
+		return ps.hydrateMapRecursively(data, nil)
 	default:
 		return errors.Errorf("hydrate k8s object is of kind=%q (supported: ConfigMap, Secret)", kind)
 	}
@@ -113,21 +112,13 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 		case "json", "yml", "yaml", "toml":
 			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: data.%q (base64-encoded %v file data)\n", kind, name, key, strings.ToUpper(format))
 
-			data, err := GetData(bytes.NewReader(decoded), format)
+			var b bytes.Buffer
+			err := ps.Hydrate(&b, bytes.NewReader(decoded), format, false)
 			if err != nil {
 				log.Fatal(err)
 			}
-
-			if err := ps.Hydrate(data); err != nil {
-				log.Fatal(err)
-			}
-
-			var b bytes.Buffer
-			if err := PrintData(&b, data, format); err != nil {
-				log.Fatal(err)
-			}
-
 			k8sData[key] = base64.StdEncoding.EncodeToString(b.Bytes())
+
 		default:
 			// Just a value, not a file.
 			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: data.%q (base64-encoded value)\n", kind, name, key)
@@ -153,17 +144,8 @@ func (ps *paramStore) HydrateK8s(data map[string]interface{}) error {
 		case "json", "yml", "yaml", "toml":
 			fmt.Fprintf(os.Stderr, "hydrate k8s %v/%v: hydrate stringData.%q (plain-text %v file data)\n", kind, name, key, strings.ToUpper(format))
 
-			data, err := GetData(strings.NewReader(str), format)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			if err := ps.Hydrate(data); err != nil {
-				log.Fatal(err)
-			}
-
 			var b bytes.Buffer
-			if err := PrintData(&b, data, format); err != nil {
+			if err := ps.Hydrate(&b, strings.NewReader(str), format, false); err != nil {
 				log.Fatal(err)
 			}
 
@@ -208,7 +190,7 @@ func (ps *paramStore) hydrateKeyValue(key, value string) (*string, error) {
 	return nil, nil
 }
 
-func (ps *paramStore) hydrateRecursively(data map[string]interface{}, path []string) error {
+func (ps *paramStore) hydrateMapRecursively(data map[string]interface{}, path []string) error {
 	for key, value := range data {
 		switch v := value.(type) {
 		case string:
@@ -220,7 +202,7 @@ func (ps *paramStore) hydrateRecursively(data map[string]interface{}, path []str
 
 		case map[string]interface{}:
 			// Recursively go deeper.
-			if err := ps.hydrateRecursively(v, append(path, key)); err != nil {
+			if err := ps.hydrateMapRecursively(v, append(path, key)); err != nil {
 				return err
 			}
 		}

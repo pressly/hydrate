@@ -36,9 +36,6 @@ func (ps *paramStore) GetSecret(key string) (string, error) {
 		if ps.basePath == "" {
 			return "", errors.Errorf("%q doesn't look like a valid parameter path, did you provide default path, ie. --path=/app/sit1/ ?", key)
 		}
-		if !strings.HasPrefix(key, ps.basePath) {
-			fmt.Fprintf(os.Stderr, "\tWARNING: %q secret key doesn't match the base path %q\n", key, ps.basePath)
-		}
 		key = filepath.Join(ps.basePath, key)
 	}
 
@@ -46,7 +43,7 @@ func (ps *paramStore) GetSecret(key string) (string, error) {
 		return secret, nil
 	}
 
-	fmt.Fprintf(os.Stderr, "- fetching %q secret from AWS SSM Parameter Store\n", key)
+	fmt.Fprintf(os.Stderr, "hydrate: - fetching %q secret from AWS SSM Parameter Store\n", key)
 
 	param, err := ps.ssm.GetParameter(&ssm.GetParameterInput{
 		Name:           aws.String(key),
@@ -124,6 +121,9 @@ func (ps *paramStore) hydrateK8sObject(data map[string]interface{}) error {
 				if err != nil {
 					return errors.Wrapf(err, "hydrate: k8s %v/%v: failed to hydrate %v", kind, name, key)
 				}
+				if closer, ok := valueWriter.(io.Closer); ok {
+					closer.Close()
+				}
 				loopOver[key] = b.String()
 
 			default:
@@ -136,6 +136,9 @@ func (ps *paramStore) hydrateK8sObject(data map[string]interface{}) error {
 					return errors.Wrapf(err, "hydrate: k8s %v/%v: failed to hydrate %v", kind, name, key)
 				} else if secret != nil {
 					valueWriter.Write([]byte(*secret))
+					if closer, ok := valueWriter.(io.Closer); ok {
+						closer.Close()
+					}
 					loopOver[key] = b.String()
 				}
 			}

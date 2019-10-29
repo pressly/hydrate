@@ -72,12 +72,8 @@ func (ps *paramStore) hydrateK8sObject(data map[string]interface{}) error {
 	switch kind {
 	case "ConfigMap", "Secret":
 		kind = strings.ToLower(kind)
-		// OK. Proceed.
-	case "":
-		// Empty kind, this doesn't look like k8s object at all.. let's treat it as regular file.
-		return ps.hydrateMapRecursively(data, nil)
 	default:
-		return errors.Errorf("hydrate: k8s object is of kind=%q (supported: ConfigMap, Secret)", kind)
+		return nil // Leave any objects that are not ConfigMap or Secret untouched.
 	}
 
 	metadata, ok := data["metadata"].(map[string]interface{})

@@ -184,6 +184,23 @@ func (ps *paramStore) hydrateMapRecursively(data map[string]interface{}, path []
 			if err := ps.hydrateMapRecursively(v, append(path, key)); err != nil {
 				return err
 			}
+
+		// Support YAML merge syntax: https://yaml.org/type/merge.html
+		// The encoder treats merge objects as a map[interface{}]interface{} type
+		// We convert the interface{} key to a string and assign it back to the original map
+		// so that the hydrated secrets can be available for the upstream caller.
+		case map[interface{}]interface{}:
+			vv := map[string]interface{}{}
+			for k, v := range v {
+				vv[k.(string)] = v
+			}
+			data[key] = vv
+
+			// Recursively go deeper.
+			if err := ps.hydrateMapRecursively(vv, append(path, key)); err != nil {
+				return err
+			}
+
 		}
 	}
 	return nil
